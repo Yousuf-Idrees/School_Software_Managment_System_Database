@@ -1,0 +1,437 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pyodbc
+import sys
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# ==========================================
+# PART 1: BACKEND LOGIC (The Model)
+# ==========================================
+class SchoolDBManager:
+    def __init__(self, server, database):
+        self.conn_str = (
+            f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            f"Trusted_Connection=yes;"
+        )
+        self.conn = None
+        self.cursor = None
+
+    def connect(self):
+        try:
+            self.conn = pyodbc.connect(self.conn_str)
+            self.cursor = self.conn.cursor()
+            return True
+        except pyodbc.Error as e:
+            messagebox.showerror("Connection Error", f"Failed to connect: {e}")
+            return False
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
+    # ---------------------------------------------------------
+    # ENTITY 1: CLASSROOM (Matches your ClassRoom Table)
+    # ---------------------------------------------------------
+    def add_classroom(self, class_num, floor, capacity):
+        # 1. Python Validation (Requirement: "Ensure data validation")
+        if not str(capacity).isdigit() or int(capacity) <= 0:
+            return False, "Capacity must be a positive number."
+
+        try:
+            sql = "INSERT INTO ClassRoom (Class_Number, Floor, Capacity) VALUES (?, ?, ?)"
+            self.cursor.execute(sql, (class_num, floor, capacity))
+            self.conn.commit()
+            return True, "Classroom added successfully."
+        except Exception as e:
+            return False, str(e)
+
+    def update_classroom(self, class_num, floor, capacity):
+        if not str(capacity).isdigit() or int(capacity) <= 0:
+            return False, "Capacity must be a positive number."
+
+        try:
+            sql = "UPDATE ClassRoom SET Floor = ?, Capacity = ? WHERE Class_Number = ?"
+            self.cursor.execute(sql, (floor, capacity, class_num))
+            self.conn.commit()
+            return True, "Classroom updated successfully."
+        except Exception as e:
+            return False, str(e)
+
+    def delete_classroom(self, class_num):
+        try:
+            sql = "DELETE FROM ClassRoom WHERE Class_Number = ?"
+            self.cursor.execute(sql, (class_num,))
+            self.conn.commit()
+            return True, "Classroom deleted successfully."
+        except Exception as e:
+            # Captures Foreign Key error if you try to delete a class that has students
+            return False, f"Cannot delete: Check if students are assigned to this class.\nSQL Error: {e}"
+
+    # ---------------------------------------------------------
+    # ENTITY 2: STUDENT (Matches your Student Table)
+    # ---------------------------------------------------------
+    def add_student(self, username, password, first, last, academic_year, class_num):
+        # 1. Python Validation (Requirement: "Ensure data validation")
+        if not str(academic_year).isdigit():
+            return False, "Academic Year must be a number."
+        
+        # Matches SQL CHECK (Academic_Year BETWEEN 1 AND 12)
+        if not (1 <= int(academic_year) <= 12):
+            return False, "Academic Year must be between 1 and 12."
+
+        try:
+            # Matches Schema: Student_Username, Password, First_Name, Last_Name, Academic_Year, Class_Number
+            sql = """INSERT INTO Student 
+                     (Student_Username, Password, First_Name, Last_Name, Academic_Year, Class_Number) 
+                     VALUES (?, ?, ?, ?, ?, ?)"""
+            self.cursor.execute(sql, (username, password, first, last, academic_year, class_num))
+            self.conn.commit()
+            return True, "Student added successfully."
+        except Exception as e:
+            return False, f"Database Error: {e}"
+
+    def update_student(self, username, first, last, academic_year, class_num):
+        if not (1 <= int(academic_year) <= 12):
+            return False, "Academic Year must be between 1 and 12."
+
+        try:
+            sql = """UPDATE Student 
+                     SET First_Name=?, Last_Name=?, Academic_Year=?, Class_Number=? 
+                     WHERE Student_Username=?"""
+            self.cursor.execute(sql, (first, last, academic_year, class_num, username))
+            self.conn.commit()
+            return True, "Student updated successfully."
+        except Exception as e:
+            return False, f"Database Error: {e}"
+
+    def delete_student(self, username):
+        try:
+            sql = "DELETE FROM Student WHERE Student_Username=?"
+            self.cursor.execute(sql, (username,))
+            self.conn.commit()
+            return True, "Student deleted successfully."
+        except Exception as e:
+            return False, f"Database Error: {e}"
+
+    # ---------------------------------------------------------
+    # VIEWS & REPORTS
+    # ---------------------------------------------------------
+    def get_all_classrooms(self):
+        sql = "SELECT Class_Number, Floor, Capacity FROM ClassRoom"
+        self.cursor.execute(sql)
+        return self.cursor.fetchall()
+
+    def get_all_students(self):
+        sql = "SELECT Student_Username, First_Name, Last_Name, Academic_Year, Class_Number FROM Student"
+        self.cursor.execute(sql)
+        return self.cursor.fetchall()
+
+    def get_student_roster_view(self):
+        # Joins Student and ClassRoom
+        sql = """
+        SELECT S.Student_Username, S.First_Name, S.Last_Name, S.Academic_Year, C.Class_Number, C.Floor 
+        FROM Student S
+        INNER JOIN ClassRoom C ON S.Class_Number = C.Class_Number
+        """
+        self.cursor.execute(sql)
+        return self.cursor.fetchall()
+
+    def get_class_utilization_report(self):
+        # Counts students per class
+        sql = """
+        SELECT C.Class_Number, COUNT(S.Student_Username) as Student_Count
+        FROM ClassRoom C
+        LEFT JOIN Student S ON C.Class_Number = S.Class_Number
+        GROUP BY C.Class_Number
+        """
+        self.cursor.execute(sql)
+        return self.cursor.fetchall()
+
+
+# ==========================================
+# PART 2: FRONTEND GUI (The View)
+# ==========================================
+class SchoolManagementApp:
+    def __init__(self, root, db_manager):
+        self.root = root
+        self.db = db_manager
+        self.root.title("SchoolDB Management System")
+        self.root.geometry("1000x750")
+
+        if not self.db.connect():
+            self.root.destroy()
+            return
+
+        self.tab_control = ttk.Notebook(root)
+        
+        self.tab_crud_class = ttk.Frame(self.tab_control)
+        self.tab_crud_student = ttk.Frame(self.tab_control)
+        self.tab_views = ttk.Frame(self.tab_control)
+        self.tab_reports = ttk.Frame(self.tab_control)
+
+        self.tab_control.add(self.tab_crud_class, text='Manage Classrooms')
+        self.tab_control.add(self.tab_crud_student, text='Manage Students')
+        self.tab_control.add(self.tab_views, text='Roster View')
+        self.tab_control.add(self.tab_reports, text='Analytics')
+        
+        self.tab_control.pack(expand=1, fill="both")
+
+        self.setup_crud_class_tab()
+        self.setup_crud_student_tab()
+        self.setup_views_tab()
+        self.setup_reports_tab()
+
+    # ----------------------------
+    # TAB 1: Class CRUD
+    # ----------------------------
+    def setup_crud_class_tab(self):
+        frame = ttk.LabelFrame(self.tab_crud_class, text="Classroom Operations", padding=20)
+        frame.pack(padx=20, pady=20, fill="both", expand=True)
+
+        ttk.Label(frame, text="Class Number (ID):").grid(row=0, column=0, padx=5, pady=5)
+        self.entry_class_num = ttk.Entry(frame)
+        self.entry_class_num.grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Floor:").grid(row=1, column=0, padx=5, pady=5)
+        self.entry_floor = ttk.Entry(frame)
+        self.entry_floor.grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(frame, text="Capacity:").grid(row=2, column=0, padx=5, pady=5)
+        self.entry_capacity = ttk.Entry(frame)
+        self.entry_capacity.grid(row=2, column=1, padx=5, pady=5)
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text="INSERT Class", command=self.handle_insert_class).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="UPDATE Class", command=self.handle_update_class).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="DELETE Class", command=self.handle_delete_class).pack(side="left", padx=5)
+
+        self.tree_classes = ttk.Treeview(frame, columns=("Num", "Floor", "Cap"), show='headings', height=8)
+        self.tree_classes.heading("Num", text="Class #")
+        self.tree_classes.heading("Floor", text="Floor")
+        self.tree_classes.heading("Cap", text="Capacity")
+        self.tree_classes.grid(row=4, column=0, columnspan=2, pady=10, sticky="nsew")
+        
+        self.refresh_class_list()
+
+    def refresh_class_list(self):
+        for i in self.tree_classes.get_children():
+            self.tree_classes.delete(i)
+        rows = self.db.get_all_classrooms()
+        for row in rows:
+            self.tree_classes.insert("", "end", values=(row.Class_Number, row.Floor, row.Capacity))
+
+    def handle_insert_class(self):
+        success, msg = self.db.add_classroom(self.entry_class_num.get(), self.entry_floor.get(), self.entry_capacity.get())
+        if success:
+            messagebox.showinfo("Success", msg)
+            self.refresh_class_list()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def handle_update_class(self):
+        success, msg = self.db.update_classroom(self.entry_class_num.get(), self.entry_floor.get(), self.entry_capacity.get())
+        if success:
+            messagebox.showinfo("Success", msg)
+            self.refresh_class_list()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def handle_delete_class(self):
+        success, msg = self.db.delete_classroom(self.entry_class_num.get())
+        if success:
+            messagebox.showinfo("Success", msg)
+            self.refresh_class_list()
+        else:
+            messagebox.showerror("Error", msg)
+
+    # ----------------------------
+    # TAB 2: Student CRUD
+    # ----------------------------
+    def setup_crud_student_tab(self):
+        frame = ttk.LabelFrame(self.tab_crud_student, text="Student Operations", padding=20)
+        frame.pack(padx=20, pady=20, fill="both", expand=True)
+
+        # 1. Username
+        ttk.Label(frame, text="Username (ID):").grid(row=0, column=0, padx=5, pady=5)
+        self.entry_stu_user = ttk.Entry(frame)
+        self.entry_stu_user.grid(row=0, column=1, padx=5, pady=5)
+
+        # 2. Password
+        ttk.Label(frame, text="Password:").grid(row=1, column=0, padx=5, pady=5)
+        self.entry_stu_pass = ttk.Entry(frame, show="*") 
+        self.entry_stu_pass.grid(row=1, column=1, padx=5, pady=5)
+
+        # 3. First Name
+        ttk.Label(frame, text="First Name:").grid(row=2, column=0, padx=5, pady=5)
+        self.entry_stu_first = ttk.Entry(frame)
+        self.entry_stu_first.grid(row=2, column=1, padx=5, pady=5)
+
+        # 4. Last Name
+        ttk.Label(frame, text="Last Name:").grid(row=3, column=0, padx=5, pady=5)
+        self.entry_stu_last = ttk.Entry(frame)
+        self.entry_stu_last.grid(row=3, column=1, padx=5, pady=5)
+
+        # 5. Academic Year (Corrected Order for UI flow)
+        ttk.Label(frame, text="Academic Year (1-12):").grid(row=4, column=0, padx=5, pady=5)
+        self.entry_stu_year = ttk.Entry(frame)
+        self.entry_stu_year.grid(row=4, column=1, padx=5, pady=5)
+
+        # 6. Class Number
+        ttk.Label(frame, text="Assign Class #:").grid(row=5, column=0, padx=5, pady=5)
+        self.entry_stu_class = ttk.Entry(frame)
+        self.entry_stu_class.grid(row=5, column=1, padx=5, pady=5)
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=6, column=0, columnspan=2, pady=20)
+        ttk.Button(btn_frame, text="INSERT Student", command=self.handle_insert_student).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="UPDATE Student", command=self.handle_update_student).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="DELETE Student", command=self.handle_delete_student).pack(side="left", padx=5)
+
+        # Treeview
+        self.tree_students = ttk.Treeview(frame, columns=("User", "First", "Last", "Year", "Class"), show='headings', height=8)
+        self.tree_students.heading("User", text="Username")
+        self.tree_students.heading("First", text="First Name")
+        self.tree_students.heading("Last", text="Last Name")
+        self.tree_students.heading("Year", text="Academic Year") 
+        self.tree_students.heading("Class", text="Class #")
+        self.tree_students.grid(row=7, column=0, columnspan=2, pady=10, sticky="nsew")
+        
+        self.refresh_student_list()
+
+    def refresh_student_list(self):
+        for i in self.tree_students.get_children():
+            self.tree_students.delete(i)
+        rows = self.db.get_all_students()
+        for row in rows:
+            # Matches SQL Select order: User, First, Last, Year, Class
+            self.tree_students.insert("", "end", values=(row.Student_Username, row.First_Name, row.Last_Name, row.Academic_Year, row.Class_Number))
+
+    def handle_insert_student(self):
+        success, msg = self.db.add_student(
+            self.entry_stu_user.get(), 
+            self.entry_stu_pass.get(),
+            self.entry_stu_first.get(), 
+            self.entry_stu_last.get(), 
+            self.entry_stu_year.get(),  # Academic Year
+            self.entry_stu_class.get()  # Class Number
+        )
+        if success:
+            messagebox.showinfo("Success", msg)
+            self.refresh_student_list()
+            self.refresh_report()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def handle_update_student(self):
+        success, msg = self.db.update_student(
+            self.entry_stu_user.get(), 
+            self.entry_stu_first.get(), 
+            self.entry_stu_last.get(), 
+            self.entry_stu_year.get(),
+            self.entry_stu_class.get()
+        )
+        if success:
+            messagebox.showinfo("Success", msg)
+            self.refresh_student_list()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def handle_delete_student(self):
+        success, msg = self.db.delete_student(self.entry_stu_user.get())
+        if success:
+            messagebox.showinfo("Success", msg)
+            self.refresh_student_list()
+        else:
+            messagebox.showerror("Error", msg)
+
+    # ----------------------------
+    # TAB 3: VIEWS
+    # ----------------------------
+    def setup_views_tab(self):
+        frame = ttk.LabelFrame(self.tab_views, text="Joined View: Students & Classrooms", padding=10)
+        frame.pack(padx=10, pady=10, fill="both", expand=True)
+
+        self.tree_view = ttk.Treeview(frame, columns=("User", "First", "Last", "Year", "Class", "Floor"), show='headings')
+        self.tree_view.heading("User", text="Username")
+        self.tree_view.heading("First", text="First Name")
+        self.tree_view.heading("Last", text="Last Name")
+        self.tree_view.heading("Year", text="Year")
+        self.tree_view.heading("Class", text="Class Room")
+        self.tree_view.heading("Floor", text="Floor")
+        
+        self.tree_view.pack(fill="both", expand=True)
+
+        btn_refresh = ttk.Button(self.tab_views, text="Refresh Data", command=self.load_join_view)
+        btn_refresh.pack(pady=5)
+        
+        self.load_join_view()
+
+    def load_join_view(self):
+        for i in self.tree_view.get_children():
+            self.tree_view.delete(i)
+        rows = self.db.get_student_roster_view()
+        if rows:
+            for row in rows:
+                self.tree_view.insert("", "end", values=(row.Student_Username, row.First_Name, row.Last_Name, row.Academic_Year, row.Class_Number, row.Floor))
+
+    # ----------------------------
+    # TAB 4: REPORTS
+    # ----------------------------
+    def setup_reports_tab(self):
+        frame = ttk.Frame(self.tab_reports)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        lbl = ttk.Label(frame, text="Report: Student Distribution per Class", font=("Arial", 14, "bold"))
+        lbl.pack(pady=10)
+
+        self.chart_frame = tk.Frame(frame)
+        self.chart_frame.pack(fill="both", expand=True)
+        
+        self.refresh_report()
+
+    def refresh_report(self):
+        for widget in self.chart_frame.winfo_children():
+            widget.destroy()
+
+        data = self.db.get_class_utilization_report()
+        if not data:
+            ttk.Label(self.chart_frame, text="No data available for reports.").pack()
+            return
+
+        classes = [str(row.Class_Number) for row in data]
+        counts = [row.Student_Count for row in data]
+
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+        bars = ax.bar(classes, counts, color='#4CAF50')
+        
+        ax.set_title('Number of Students per Class Room')
+        ax.set_xlabel('Class Number')
+        ax.set_ylabel('Student Count')
+        ax.bar_label(bars)
+
+        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill="both", expand=True)
+
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
+if __name__ == "__main__":
+    SERVER_NAME = r'(localdb)\MSSQLLocalDB' # UPDATE THIS to your actual server name
+    DB_NAME = 'SchoolDB'
+
+    db_manager = SchoolDBManager(SERVER_NAME, DB_NAME)
+    
+    root = tk.Tk()
+    style = ttk.Style()
+    style.theme_use('clam') 
+    
+    app = SchoolManagementApp(root, db_manager)
+    
+    root.protocol("WM_DELETE_WINDOW", lambda: [db_manager.close(), root.destroy()])
+    root.mainloop()
